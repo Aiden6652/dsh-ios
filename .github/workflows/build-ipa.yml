@@ -26,10 +26,14 @@ jobs:
           node -v; npm -v; ruby -v
 
       - name: Install build tools
-        run: brew install meson ninja lld
+        run: |
+          brew install meson ninja lld libarchive pkg-config
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/libarchive/lib/pkgconfig:${PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
 
       - name: Build iSH-ARM64 emulator
-        run: make emulator
+        run: |
+          make emulator
+          ls -l ish-arm64/build-arm64-release/tools/fakefsify ish-arm64/build-arm64-release/tools/unfakefsify ish-arm64/build-arm64-release/ish
 
       - name: Build guest rootfs (Alpine + Node 22 + dsh)
         run: make rootfs
