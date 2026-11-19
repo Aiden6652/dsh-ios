@@ -1,0 +1,82 @@
+name: Build DSH IPA (sideloadable)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/build-ipa.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pick latest Xcode & env
+        run: |
+          X=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$X" ]; then sudo xcode-select -s "$X"; fi
+          echo "arch=$(uname -m)"
+          xcodebuild -version
+          node -v; npm -v; ruby -v
+
+      - name: Install build tools
+        run: brew install meson ninja lld
+
+      - name: Build iSH-ARM64 emulator
+        run: make emulator
+
+      - name: Build guest rootfs (Alpine + Node 22 + dsh)
+        run: make rootfs
+
+      - name: Clear restricted entitlements (no dev team needed)
+        run: |
+          cat > app/DSH.entitlements <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict></dict>
+          </plist>
+          EOF
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild -project DSH.xcodeproj -scheme DSH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_STYLE=Manual \
+            DSH_DEVELOPMENT_TEAM= \
+            clean build
+
+      - name: ad-hoc sign + pack IPA
+        run: |
+          APP="build/DerivedData/Build/Products/Release-iphoneos/DSH.app"
+          if [ ! -d "$APP" ]; then echo 'app not built'; find build/DerivedData -name '*.app' -maxdepth 7; exit 1; fi
+          codesign --force --deep --sign - "$APP"
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry DSH-adhoc.ipa Payload
+          shasum -a 256 DSH-adhoc.ipa
+          ls -lh DSH-adhoc.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-adhoc-ipa
+          path: DSH-adhoc.ipa
+          if-no-files-found: error
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="dsh-ios-adhoc-$(date +%Y%m%d)-${{ github.run_number }}"
+          gh release create "$TAG" DSH-adhoc.ipa \
+            --title "DSHIOS $TAG" \
+            --notes "Ad-hoc signed IPA, sideloadable. Guest: Alpine 3.21 + Node 22 + @deepseek-ai/dsh. Install with SideStore / LiveContainer / PlumeImpactor. See README.zh.md."
+          echo "$TAG" > build/release-tag.txt
